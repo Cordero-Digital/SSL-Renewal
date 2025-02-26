@@ -18,6 +18,7 @@ require plugin_dir_path( __FILE__ ) . '/vendor/autoload.php';
 if (defined('WP_CLI') && WP_CLI) {
     WP_CLI::add_command('ssl:renew', 'SSL_Renewal_Command');
     WP_CLI::add_command('ssl:dns-challenge', 'SSL_DNS_Challenge');
+    WP_CLI::add_command('ssl:install', 'SSL_Move_Files');
 }
 
 use Aws\Route53\Route53Client;
@@ -25,8 +26,12 @@ use Aws\Exception\AwsException;
 
 class SSL_Renewal_Command {
     public function __invoke($args, $assoc_args) {
-        $domain = 'tomascordero.com';
-        $wildcard = '*.tomascordero.com';
+        if (!isset($assoc_args['domain'])) {
+            WP_CLI::error('Missing required argument: domain. ex: --domain=example.com');
+            return;
+        }
+        $domain = $assoc_args['domain'];
+        $wildcard = "*.{$assoc_args['domain']}";
         $zoneId = getenv('AWS_ROUTE53_ZONE_ID') ?: AWS_ROUTE53_ZONE_ID;
 
         WP_CLI::log('Starting SSL renewal process...');
@@ -87,11 +92,47 @@ class SSL_DNS_Challenge {
                 ],
             ]);
 
-            WP_CLI::success("DNS record added! Waiting for propagation...");
-            sleep(30); // Give DNS time to propagate
+            WP_CLI::success("DNS record added! Waiting for propagation... once done, run 'wp ssl:install --domain={$domain}'");
 
         } catch (AwsException $e) {
             WP_CLI::error("AWS Route 53 Error: " . $e->getMessage());
         }
+    }
+}
+
+class SSL_Move_Files {
+    public function __invoke($args, $assoc_args) {
+        $domain = $assoc_args['domain'];
+
+        WP_CLI::log("Moving certificate files to web server...");
+
+        try {
+            $result_code = 0;
+            exec("sudo mv /opt/bitnami/apache2/conf/bitnami/certs/server.crt /opt/bitnami/apache2/conf/bitnami/certs/server.crt.old", result_code: $result_code);
+            if ($result_code !== 0) {
+                WP_CLI::error("Error moving server.crt file!");
+                return;
+            }
+            exec("sudo mv /opt/bitnami/apache2/conf/bitnami/certs/server.key /opt/bitnami/apache2/conf/bitnami/certs/server.key.old", result_code: $result_code);
+            if ($result_code !== 0) {
+                WP_CLI::error("Error moving server.key file!");
+                return;
+            }
+            exec("sudo ln -sf /etc/letsencrypt/live/$domain/privkey.pem /opt/bitnami/apache2/conf/bitnami/certs/server.key", result_code: $result_code);
+            if ($result_code !== 0) {
+                WP_CLI::error("Error moving privkey.pem file!");
+                return;
+            }
+            exec("sudo ln -sf /etc/letsencrypt/live/$domain/fullchain.pem /opt/bitnami/apache2/conf/bitnami/certs/server.crt", result_code: $result_code);
+            if ($result_code !== 0) {
+                WP_CLI::error("Error moving fullchain.pem file!");
+                return;
+            }
+        } catch(\Exception $e) {
+            WP_CLI::error("Error moving certificate files: " . $e->getMessage());
+            return;
+        }
+
+        WP_CLI::success("Certificate files moved successfully!");
     }
 }
